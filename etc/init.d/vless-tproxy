@@ -1,0 +1,35 @@
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=95
+STOP=10
+
+RULES_FILE="/etc/vless-tproxy.nft"
+
+apply_sysctl() {
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
+    sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
+    for iface in /proc/sys/net/ipv4/conf/*/rp_filter; do
+        echo 0 > "$iface" 2>/dev/null
+    done
+}
+
+start_service() {
+    apply_sysctl
+    ip rule del fwmark 1 table 100 2>/dev/null
+    ip rule add fwmark 1 table 100 2>/dev/null
+    ip route flush table 100 2>/dev/null
+    ip route add local 0.0.0.0/0 dev lo table 100
+    nft -f "$RULES_FILE"
+}
+
+stop_service() {
+    nft delete table inet vless_tproxy 2>/dev/null
+    ip rule del fwmark 1 table 100 2>/dev/null
+    ip route flush table 100 2>/dev/null
+}
+
+reload_service() {
+    stop
+    start
+}
