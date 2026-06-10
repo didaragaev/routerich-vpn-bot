@@ -281,6 +281,29 @@ if [ "$STAGE" -lt 4 ]; then
     done
 
     ok "Все файлы бота скачаны"
+
+    # Скачиваем geoip.dat и geosite.dat для умной маршрутизации
+    # RU-трафик пойдёт напрямую, всё остальное — через VLESS
+    inf "Скачиваю geoip.dat..."
+    mkdir -p /usr/share/xray
+    wget -q --show-progress -O /usr/share/xray/geoip.dat \
+        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+    if [ $? -ne 0 ] || [ ! -s /usr/share/xray/geoip.dat ]; then
+        warn "geoip.dat не скачался — маршрутизация будет без разделения RU/не-RU"
+        warn "Можно скачать вручную позже: wget -O /usr/share/xray/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+    else
+        ok "geoip.dat ($(du -h /usr/share/xray/geoip.dat | cut -f1))"
+    fi
+
+    inf "Скачиваю geosite.dat..."
+    wget -q -O /usr/share/xray/geosite.dat \
+        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+    if [ $? -ne 0 ] || [ ! -s /usr/share/xray/geosite.dat ]; then
+        warn "geosite.dat не скачался — продолжаем без него"
+    else
+        ok "geosite.dat ($(du -h /usr/share/xray/geosite.dat | cut -f1))"
+    fi
+
     set_stage 4
     echo ""
 fi

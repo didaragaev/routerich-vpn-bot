@@ -17,6 +17,14 @@ PRIVATE_IP_RANGES = [
     "fe80::/10",
 ]
 
+GEOIP_DAT = "/usr/share/xray/geoip.dat"
+
+
+def _has_geoip() -> bool:
+    """Проверяет есть ли geoip.dat на роутере."""
+    import os
+    return os.path.exists(GEOIP_DAT) and os.path.getsize(GEOIP_DAT) > 1024
+
 
 def build_vless_outbound(link: dict) -> dict:
     stream = {
@@ -100,7 +108,14 @@ def build_config(link: dict) -> dict:
         "routing": {
             "domainStrategy": "IPIfNonMatch",
             "rules": [
+                # Локальные сети — всегда напрямую
                 {"type": "field", "ip": PRIVATE_IP_RANGES, "outboundTag": "direct"},
+                # Российские IP — напрямую (если есть geoip.dat)
+                *([
+                    {"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"},
+                    {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
+                ] if _has_geoip() else []),
+                # Всё остальное — через VLESS
             ],
         },
     }
