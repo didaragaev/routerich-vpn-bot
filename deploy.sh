@@ -1,340 +1,368 @@
 #!/bin/sh
 # =============================================================================
-# RouteRich VPN Bot — Deploy Script
+# RouteRich/Cudy VPN Bot — Deploy Script v2
 # Репо: https://github.com/didaragaev/routerich-vpn-bot
 #
-# Использование:
-#   bash deploy.sh --token "BOT_TOKEN" --admin-id "TELEGRAM_ID"
+# Использование (один раз):
+#   sh deploy.sh --token "BOT_TOKEN" --admin-id "TELEGRAM_ID"
 #
-# Пример:
-#   bash deploy.sh --token "1234567890:AAH..." --admin-id "123456789"
-#
-# Скрипт поддерживает resume: если прервался на каком-то шаге,
-# запусти повторно с теми же параметрами — продолжит с нужного места.
+# Скрипт полностью автономный:
+#   - Сам перезапускается после ребута через rc.local
+#   - Идемпотентный: можно запускать сколько угодно раз
+#   - Проверяет факты, не флаги
 # =============================================================================
 
 REPO="https://raw.githubusercontent.com/didaragaev/routerich-vpn-bot/main"
 BOT_DIR="/opt/tgbot"
-STAGE_FILE="/etc/deploy_stage"
-LOG_FILE="/tmp/deploy.log"
+LOG_FILE="/var/log/deploy.log"
+RC_LOCAL="/etc/rc.local"
+SELF="$0"
 
-# --- Цвета ---
-RED=''
-GREEN=''
-YELLOW=''
-BLUE=''
-NC=''
-
-# --- Аргументы ---
+# --- Парсим аргументы ---
 BOT_TOKEN=""
 ADMIN_ID=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --token)   BOT_TOKEN="$2";  shift 2 ;;
-        --admin-id) ADMIN_ID="$2"; shift 2 ;;
+        --token)    BOT_TOKEN="$2"; shift 2 ;;
+        --admin-id) ADMIN_ID="$2";  shift 2 ;;
+        --resume)   RESUME=1;       shift 1 ;;
         *) echo "Неизвестный параметр: $1"; exit 1 ;;
     esac
 done
 
 # --- Проверка параметров ---
+# При resume читаем сохранённые параметры
+if [ "${RESUME}" = "1" ] && [ -f /etc/deploy_params ]; then
+    . /etc/deploy_params
+fi
+
 if [ -z "$BOT_TOKEN" ] || [ -z "$ADMIN_ID" ]; then
     echo ""
     echo "Использование:"
-    echo "  bash deploy.sh --token \"BOT_TOKEN\" --admin-id \"TELEGRAM_ID\""
-    echo ""
-    echo "Пример:"
-    echo "  bash deploy.sh --token \"1234567890:AAH...\" --admin-id \"123456789\""
+    echo "  sh deploy.sh --token \"BOT_TOKEN\" --admin-id \"TELEGRAM_ID\""
     echo ""
     exit 1
 fi
 
 # --- Утилиты ---
-log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
-ok()  { echo "${GREEN}  ✅ $1${NC}"; log "OK: $1"; }
-err() { echo "${RED}  ❌ $1${NC}"; log "ERR: $1"; }
-inf() { echo "${BLUE}  → $1${NC}"; log "INF: $1"; }
-warn(){ echo "${YELLOW}  ⚠️  $1${NC}"; log "WARN: $1"; }
+log()  { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
+ok()   { log "OK:   $1"; echo "  [OK] $1"; }
+err()  { log "ERR:  $1"; echo "  [!!] $1"; }
+inf()  { log "    : $1"; echo "  ... $1"; }
+warn() { log "WARN: $1"; echo "  [~] $1"; }
 
-get_stage() { cat "$STAGE_FILE" 2>/dev/null || echo "0"; }
-set_stage() { echo "$1" > "$STAGE_FILE"; }
+# --- Сохраняем параметры для resume ---
+save_params() {
+    cat > /etc/deploy_params << EOF
+BOT_TOKEN="$BOT_TOKEN"
+ADMIN_ID="$ADMIN_ID"
+EOF
+}
 
-# --- Заголовок ---
+# --- Прописываем себя в rc.local для автозапуска после ребута ---
+register_resume() {
+    # Удаляем старую запись если есть
+    unregister_resume
+
+    # Добавляем перед exit 0
+    RESUME_CMD="sh /root/deploy.sh --resume >> /var/log/deploy.log 2>&1 &"
+    if [ -f "$RC_LOCAL" ]; then
+        # Вставляем перед последней строкой (exit 0)
+        sed -i "/^exit 0/i $RESUME_CMD" "$RC_LOCAL"
+    else
+        printf "#!/bin/sh\n$RESUME_CMD\nexit 0\n" > "$RC_LOCAL"
+        chmod +x "$RC_LOCAL"
+    fi
+    log "Зарегистрирован автозапуск после ребута"
+}
+
+# --- Удаляем себя из rc.local ---
+unregister_resume() {
+    if [ -f "$RC_LOCAL" ]; then
+        sed -i '/deploy\.sh/d' "$RC_LOCAL"
+    fi
+    rm -f /etc/deploy_params
+}
+
+# =============================================================================
+# ПРОВЕРКИ СОСТОЯНИЯ (вместо флагов)
+# =============================================================================
+
+is_extroot_active() {
+    mount | grep -q '/dev/sda.*on /overlay'
+}
+
+is_usb_present() {
+    [ -b /dev/sda ]
+}
+
+is_extroot_partition() {
+    block info 2>/dev/null | grep -q 'LABEL="extroot".*TYPE="ext4"'
+}
+
+is_xray_installed() {
+    [ -x /usr/bin/xray ]
+}
+
+is_python_installed() {
+    [ -x /usr/bin/python3 ]
+}
+
+is_bot_installed() {
+    [ -f "$BOT_DIR/bot.py" ] && [ -f "$BOT_DIR/config.py" ]
+}
+
+is_bot_configured() {
+    [ -f "$BOT_DIR/config.py" ] && grep -q "$BOT_TOKEN" "$BOT_DIR/config.py" 2>/dev/null
+}
+
+is_autostart_configured() {
+    [ -f /etc/rc.d/S100tgbot ] && [ -f /etc/rc.d/S99xray ] && [ -f /etc/rc.d/S95vless-tproxy ]
+}
+
+# =============================================================================
+# ЗАГОЛОВОК
+# =============================================================================
+
 echo ""
 echo "============================================"
-echo "  RouteRich VPN Bot — Deploy"
+echo "  RouteRich VPN Bot — Deploy v2"
 echo "  Токен: ${BOT_TOKEN:0:20}..."
 echo "  Admin ID: $ADMIN_ID"
 echo "  Лог: $LOG_FILE"
+if [ "${RESUME}" = "1" ]; then
+echo "  Режим: АВТОПРОДОЛЖЕНИЕ после ребута"
+fi
 echo "============================================"
 echo ""
 
-STAGE=$(get_stage)
-inf "Продолжаем с этапа: $STAGE"
-echo ""
+log "=== Deploy start (resume=${RESUME:-0}) ==="
 
 # =============================================================================
 # ЭТАП 1: Проверка среды
 # =============================================================================
-if [ "$STAGE" -lt 1 ]; then
-    echo "${BLUE}[1/7] Проверка среды...${NC}"
 
-    # Проверка что это OpenWrt/RouteRich
-    if [ ! -f /etc/openwrt_release ]; then
-        err "Это не OpenWrt/RouteRich! Скрипт предназначен только для RouteRich MT7981."
-        exit 1
-    fi
-    ok "RouteRich OS обнаружена"
+echo "[1/6] Проверка среды..."
 
-    # Проверка интернета
-    if ! curl -s --max-time 5 https://api.github.com > /dev/null 2>&1; then
-        err "Нет интернета. Убедись что WAN-кабель подключён и роутер получил IP."
-        exit 1
-    fi
-    ok "Интернет есть"
+if [ ! -f /etc/openwrt_release ]; then
+    err "Это не OpenWrt/RouteRich!"
+    exit 1
+fi
+ok "OpenWrt обнаружен"
 
-    # Проверка root
-    if [ "$(id -u)" -ne 0 ]; then
-        err "Запусти скрипт от root: sudo bash deploy.sh ..."
-        exit 1
-    fi
-    ok "Права root"
+if [ "$(id -u)" -ne 0 ]; then
+    err "Нужны права root"
+    exit 1
+fi
+ok "Права root"
 
-    set_stage 1
-    ok "Этап 1 завершён"
-    echo ""
+# Проверка интернета
+if ! wget -q --spider https://raw.githubusercontent.com 2>/dev/null; then
+    err "Нет интернета. Подключи WAN-кабель."
+    exit 1
+fi
+ok "Интернет есть"
+
+# Копируем скрипт в /root чтобы был доступен после ребута
+if [ "$SELF" != "/root/deploy.sh" ]; then
+    cp "$SELF" /root/deploy.sh
+    chmod +x /root/deploy.sh
 fi
 
-# =============================================================================
-# ЭТАП 2: Флешка — форматирование и extroot
-# =============================================================================
-if [ "$STAGE" -lt 2 ]; then
-    echo "${BLUE}[2/7] Настройка флешки и extroot...${NC}"
+echo ""
 
-    # Ждём пока USB-устройство определится
-    inf "Жду определения USB-устройства..."
-    sleep 3
+# =============================================================================
+# ЭТАП 2: Флешка и extroot
+# =============================================================================
 
-    USB_DEV=""
-    for i in $(seq 1 10); do
-        if [ -b /dev/sda ]; then
-            USB_DEV="/dev/sda"
-            break
-        fi
-        sleep 2
+echo "[2/6] Флешка и extroot..."
+
+if is_extroot_active; then
+    ok "extroot уже активен ($(df -h / | tail -1 | awk '{print $2}') total)"
+else
+    # Ждём флешку
+    inf "Жду USB-устройство..."
+    I=0
+    while [ $I -lt 15 ] && ! is_usb_present; do
+        sleep 1
+        I=$((I+1))
     done
 
-    if [ -z "$USB_DEV" ]; then
+    if ! is_usb_present; then
         err "USB-флешка не найдена! Вставь флешку и запусти скрипт снова."
         exit 1
     fi
-    ok "Флешка найдена: $USB_DEV"
+    ok "Флешка найдена: /dev/sda"
 
-    # Умная проверка состояния флешки
-    EXISTING_EXTROOT=$(block info 2>/dev/null | grep 'LABEL="extroot"' | grep 'TYPE="ext4"')
-    CURRENT_TYPE=$(block info "${USB_DEV}1" 2>/dev/null | grep -o 'TYPE="[^"]*"' | cut -d'"' -f2)
+    if ! is_extroot_partition; then
+        # Определяем текущий тип ФС
+        CURRENT_TYPE=$(block info /dev/sda1 2>/dev/null | grep -o 'TYPE="[^"]*"' | cut -d'"' -f2)
 
-    if [ -n "$EXISTING_EXTROOT" ]; then
-        # Уже ext4 с меткой extroot — всё готово
-        warn "Раздел extroot уже существует — пропускаем форматирование"
-    elif [ "$CURRENT_TYPE" = "ext4" ]; then
-        # ext4 но без метки — добавляем метку
-        inf "Флешка уже ext4, добавляю метку extroot..."
-        umount "${USB_DEV}1" 2>/dev/null
-        for mnt in $(mount | grep "${USB_DEV}" | awk '{print $3}'); do
-            umount "$mnt" 2>/dev/null
+        # Отмонтируем всё с флешки
+        for MNT in $(mount | grep '/dev/sda' | awk '{print $3}'); do
+            umount "$MNT" 2>/dev/null
         done
-        e2label "${USB_DEV}1" extroot 2>/dev/null || true
-        ok "Метка extroot установлена"
-    else
-        # FAT32/exFAT/NTFS/пустая — отмонтируем и форматируем
-        if [ -n "$CURRENT_TYPE" ]; then
-            inf "Обнаружена $CURRENT_TYPE — отмонтирую и форматирую в ext4..."
+        umount /dev/sda1 2>/dev/null
+        sleep 1
+
+        if [ -n "$CURRENT_TYPE" ] && [ "$CURRENT_TYPE" != "ext4" ]; then
+            inf "Обнаружена $CURRENT_TYPE — форматирую в ext4..."
         else
             inf "Форматирую флешку в ext4..."
         fi
 
-        # Отмонтируем все разделы флешки
-        for mnt in $(mount | grep "${USB_DEV}" | awk '{print $3}'); do
-            umount "$mnt" 2>/dev/null
-        done
-        umount "${USB_DEV}1" 2>/dev/null
-        sleep 1
-
-        # Размечаем флешку
-        printf "o\nn\np\n1\n\n\nw\n" | fdisk "$USB_DEV" >> "$LOG_FILE" 2>&1
-
+        # Размечаем
+        printf "o\nn\np\n1\n\n\nw\n" | fdisk /dev/sda >> "$LOG_FILE" 2>&1
         sleep 2
 
-        # Проверяем что /dev/sda1 появился
-        if [ ! -b "${USB_DEV}1" ]; then
-            err "Не удалось создать раздел ${USB_DEV}1"
+        if [ ! -b /dev/sda1 ]; then
+            err "Не удалось создать раздел /dev/sda1"
             exit 1
         fi
 
-        # Форматируем в ext4
-        mkfs.ext4 -L extroot "${USB_DEV}1" >> "$LOG_FILE" 2>&1
+        mkfs.ext4 -L extroot /dev/sda1 >> "$LOG_FILE" 2>&1
         if [ $? -ne 0 ]; then
-            err "Ошибка форматирования в ext4"
+            err "Ошибка форматирования ext4"
             exit 1
         fi
-        ok "Флешка отформатирована в ext4 (${USB_DEV}1)"
+        ok "Флешка отформатирована в ext4"
+    else
+        ok "ext4-раздел с меткой extroot уже есть"
     fi
 
     # Получаем UUID
-    UUID=$(block info "${USB_DEV}1" 2>/dev/null | grep -o 'UUID="[^"]*"' | cut -d'"' -f2)
+    UUID=$(block info /dev/sda1 2>/dev/null | grep -o 'UUID="[^"]*"' | cut -d'"' -f2)
     if [ -z "$UUID" ]; then
-        err "Не удалось получить UUID раздела"
+        err "Не удалось получить UUID"
         exit 1
     fi
     ok "UUID: $UUID"
 
-    # Настраиваем extroot
-    # Сначала монтируем флешку
-    mkdir -p /mnt/sda1
-    mount "${USB_DEV}1" /mnt/sda1
-
     # Копируем overlay на флешку
-    inf "Копирую overlay на флешку..."
-    tar -C /overlay -cvf - . | tar -C /mnt/sda1 -xf - >> "$LOG_FILE" 2>&1
-    ok "Overlay скопирован"
+    mkdir -p /mnt/extroot
+    mount /dev/sda1 /mnt/extroot 2>/dev/null
 
-    # Прописываем fstab
-    uci -q delete fstab.@mount[0] 2>/dev/null
-    uci add fstab mount
-    uci set fstab.@mount[-1].target='/overlay'
-    uci set fstab.@mount[-1].uuid="$UUID"
-    uci set fstab.@mount[-1].fstype='ext4'
-    uci set fstab.@mount[-1].enabled='1'
-    uci set fstab.@mount[-1].options='rw,noatime'
-    uci commit fstab
-    ok "fstab настроен"
+    # Копируем только если флешка пустая (нет upper/)
+    if [ ! -d /mnt/extroot/upper ]; then
+        inf "Копирую overlay на флешку..."
+        tar -C /overlay -cf - . | tar -C /mnt/extroot -xf - >> "$LOG_FILE" 2>&1
+        ok "Overlay скопирован"
+    else
+        ok "Overlay уже скопирован"
+    fi
 
-    umount /mnt/sda1
+    # Настраиваем fstab напрямую (не через uci — избегаем I/O error)
+    FSTAB_ENTRY="
+config mount
+	option target '/overlay'
+	option uuid '$UUID'
+	option fstype 'ext4'
+	option enabled '1'
+	option options 'rw,noatime'"
 
-    set_stage 2
+    # Проверяем нет ли уже такой записи
+    if ! grep -q "option uuid '$UUID'" /etc/config/fstab 2>/dev/null; then
+        echo "$FSTAB_ENTRY" >> /etc/config/fstab
+        # Синхронизируем на флешку
+        if [ -d /mnt/extroot/upper/etc/config ]; then
+            echo "$FSTAB_ENTRY" >> /mnt/extroot/upper/etc/config/fstab
+        fi
+        ok "fstab настроен (UUID: $UUID)"
+    else
+        ok "fstab уже настроен"
+    fi
 
-    ok "Этап 2 завершён — НУЖНА ПЕРЕЗАГРУЗКА"
+    umount /mnt/extroot 2>/dev/null
+
+    # Сохраняем параметры и регистрируем автозапуск
+    save_params
+    register_resume
+
+    warn "Перезагружаю роутер для активации extroot..."
+    warn "Скрипт продолжится автоматически после загрузки (~2-3 мин)"
     echo ""
-    warn "Роутер перезагрузится для применения extroot."
-    warn "После загрузки (2-3 мин) запусти скрипт снова с теми же параметрами!"
-    echo ""
-    inf "Перезагружаю через 5 секунд..."
-    sleep 5
+    sleep 3
     reboot
     exit 0
 fi
 
+echo ""
+
 # =============================================================================
-# ЭТАП 3: Проверка extroot и установка пакетов
+# ЭТАП 3: Установка пакетов
 # =============================================================================
-if [ "$STAGE" -lt 3 ]; then
-    echo "${BLUE}[3/7] Проверка extroot и установка пакетов...${NC}"
 
-    # Проверяем что extroot применился
-    OVERLAY_DEV=$(mount | grep ' /overlay ' | awk '{print $1}')
-    if echo "$OVERLAY_DEV" | grep -q "sda"; then
-        ok "extroot активен: $OVERLAY_DEV → /overlay"
-    else
-        err "extroot не применился! /overlay смонтирован с $OVERLAY_DEV"
-        err "Убедись что флешка вставлена и перезагрузи роутер вручную."
-        exit 1
-    fi
+echo "[3/6] Установка пакетов..."
 
-    # Показываем свободное место
-    FREE=$(df -h / | tail -1 | awk '{print $4}')
-    ok "Свободно на /: $FREE"
+NEED_UPDATE=0
 
-    # Обновляем списки пакетов
+if ! is_xray_installed; then
+    NEED_UPDATE=1
+fi
+if ! is_python_installed; then
+    NEED_UPDATE=1
+fi
+
+if [ $NEED_UPDATE -eq 1 ]; then
     inf "opkg update..."
     opkg update >> "$LOG_FILE" 2>&1
     if [ $? -ne 0 ]; then
-        err "opkg update не удался. Проверь интернет."
+        err "opkg update не удался"
         exit 1
     fi
-    ok "Списки пакетов обновлены"
-
-    # Устанавливаем нужные пакеты
-    for pkg in xray-core python3 python3-requests; do
-        inf "Устанавливаю $pkg..."
-        if opkg list-installed | grep -q "^$pkg "; then
-            ok "$pkg уже установлен"
-        else
-            opkg install "$pkg" >> "$LOG_FILE" 2>&1
-            if [ $? -ne 0 ]; then
-                err "Не удалось установить $pkg"
-                exit 1
-            fi
-            ok "$pkg установлен"
-        fi
-    done
-
-    set_stage 3
-    ok "Этап 3 завершён"
-    echo ""
 fi
 
-# =============================================================================
-# ЭТАП 4: Загрузка файлов бота
-# =============================================================================
-if [ "$STAGE" -lt 4 ]; then
-    echo "${BLUE}[4/7] Загрузка файлов бота...${NC}"
-
-    mkdir -p "$BOT_DIR"
-    mkdir -p /etc/xray/configs
-
-    # Список файлов для скачивания
-    BOT_FILES="bot.py tg_client.py storage.py vless_parser.py xray_manager.py ip_utils.py setup_server.py"
-
-    for f in $BOT_FILES; do
-        inf "Скачиваю $f..."
-        wget -q -O "$BOT_DIR/$f" "$REPO/bot/$f"
-        if [ $? -ne 0 ] || [ ! -s "$BOT_DIR/$f" ]; then
-            err "Не удалось скачать $f"
+for PKG in xray-core python3 python3-requests; do
+    if opkg list-installed 2>/dev/null | grep -q "^$PKG "; then
+        ok "$PKG уже установлен"
+    else
+        inf "Устанавливаю $PKG..."
+        opkg install "$PKG" >> "$LOG_FILE" 2>&1
+        if [ $? -ne 0 ]; then
+            err "Не удалось установить $PKG"
             exit 1
         fi
-        ok "$f"
-    done
-
-    ok "Все файлы бота скачаны"
-
-    # Скачиваем geoip.dat и geosite.dat для умной маршрутизации
-    # RU-трафик пойдёт напрямую, всё остальное — через VLESS
-    inf "Скачиваю geoip.dat..."
-    mkdir -p /usr/share/xray
-    wget -q --show-progress -O /usr/share/xray/geoip.dat \
-        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-    if [ $? -ne 0 ] || [ ! -s /usr/share/xray/geoip.dat ]; then
-        warn "geoip.dat не скачался — маршрутизация будет без разделения RU/не-RU"
-        warn "Можно скачать вручную позже: wget -O /usr/share/xray/geoip.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-    else
-        ok "geoip.dat ($(du -h /usr/share/xray/geoip.dat | cut -f1))"
+        ok "$PKG установлен"
     fi
+done
 
-    inf "Скачиваю geosite.dat..."
-    wget -q -O /usr/share/xray/geosite.dat \
-        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-    if [ $? -ne 0 ] || [ ! -s /usr/share/xray/geosite.dat ]; then
-        warn "geosite.dat не скачался — продолжаем без него"
-    else
-        ok "geosite.dat ($(du -h /usr/share/xray/geosite.dat | cut -f1))"
-    fi
-
-    set_stage 4
-    echo ""
-fi
+echo ""
 
 # =============================================================================
-# ЭТАП 5: Конфигурация
+# ЭТАП 4: Файлы бота и конфигурация
 # =============================================================================
-if [ "$STAGE" -lt 5 ]; then
-    echo "${BLUE}[5/7] Создание конфигурации...${NC}"
 
-    # config.py с токеном и admin_id
+echo "[4/6] Файлы бота и конфигурация..."
+
+mkdir -p "$BOT_DIR"
+mkdir -p /etc/xray/configs
+mkdir -p /usr/share/xray
+
+# Скачиваем файлы бота
+BOT_FILES="bot.py tg_client.py storage.py vless_parser.py xray_manager.py ip_utils.py setup_server.py"
+
+for F in $BOT_FILES; do
+    # Перескачиваем если файл отсутствует или пустой
+    if [ ! -s "$BOT_DIR/$F" ]; then
+        inf "Скачиваю $F..."
+        wget -q -O "$BOT_DIR/$F" "$REPO/bot/$F"
+        if [ $? -ne 0 ] || [ ! -s "$BOT_DIR/$F" ]; then
+            err "Не удалось скачать $F"
+            exit 1
+        fi
+        ok "$F"
+    else
+        ok "$F (уже есть)"
+    fi
+done
+
+# config.py — создаём или обновляем если токен изменился
+if ! is_bot_configured; then
+    inf "Создаю config.py..."
     cat > "$BOT_DIR/config.py" << PYEOF
-"""Конфигурация бота — сгенерировано deploy.sh"""
-import json
-import os
+"""Конфигурация бота — создано deploy.sh"""
+import json, os
 
 TOKEN = "$BOT_TOKEN"
 
@@ -344,15 +372,14 @@ def get_admin_id():
     try:
         with open(_ADMIN_FILE) as f:
             return int(json.load(f).get("admin_id", 0))
-    except Exception:
+    except:
         return 0
 
 def set_admin_id(chat_id):
     with open(_ADMIN_FILE, "w") as f:
         json.dump({"admin_id": chat_id}, f)
 
-ADMIN_ID = get_admin_id()
-
+ADMIN_ID      = get_admin_id()
 LINKS_FILE    = "/opt/tgbot/links.json"
 TELEGRAM_API  = "https://api.telegram.org/bot" + TOKEN
 IP_INFO_API   = "http://ip-api.com/json/{ip}?fields=country,countryCode,city,query"
@@ -362,128 +389,121 @@ PING_TIMEOUT  = 2
 HTTP_TIMEOUT  = 10
 POLL_TIMEOUT  = 30
 PYEOF
-
-    # admin.json с admin_id
-    cat > "$BOT_DIR/admin.json" << JSONEOF
-{"admin_id": $ADMIN_ID}
-JSONEOF
-
     ok "config.py создан"
-    ok "admin.json создан (ID: $ADMIN_ID)"
+else
+    ok "config.py уже настроен"
+fi
 
-    # sysctl для TPROXY
-    cat > /etc/sysctl.d/99-vless-tproxy.conf << EOF
+# admin.json
+if [ ! -f "$BOT_DIR/admin.json" ]; then
+    printf '{"admin_id": %s}' "$ADMIN_ID" > "$BOT_DIR/admin.json"
+    ok "admin.json создан (ID: $ADMIN_ID)"
+else
+    ok "admin.json уже есть"
+fi
+
+# sysctl
+cat > /etc/sysctl.d/99-vless-tproxy.conf << EOF
 net.ipv4.ip_forward=1
 net.ipv4.conf.all.rp_filter=0
 net.ipv4.conf.default.rp_filter=0
 net.ipv4.conf.lo.rp_filter=0
 EOF
-    sysctl -p /etc/sysctl.d/99-vless-tproxy.conf >> "$LOG_FILE" 2>&1
-    ok "sysctl настроен"
+sysctl -p /etc/sysctl.d/99-vless-tproxy.conf >> "$LOG_FILE" 2>&1
+ok "sysctl настроен"
 
-    # nftables правила
+# nftables правила
+if [ ! -s /etc/vless-tproxy.nft ]; then
+    inf "Скачиваю vless-tproxy.nft..."
     wget -q -O /etc/vless-tproxy.nft "$REPO/etc/vless-tproxy.nft"
     if [ $? -ne 0 ] || [ ! -s /etc/vless-tproxy.nft ]; then
         err "Не удалось скачать vless-tproxy.nft"
         exit 1
     fi
     ok "vless-tproxy.nft загружен"
-
-    # UCI: включаем Xray
-    uci set xray.enabled.enabled='1'
-    uci commit xray
-    ok "Xray UCI включён"
-
-    set_stage 5
-    echo ""
+else
+    ok "vless-tproxy.nft уже есть"
 fi
 
-# =============================================================================
-# ЭТАП 6: Init-скрипты и автозапуск
-# =============================================================================
-if [ "$STAGE" -lt 6 ]; then
-    echo "${BLUE}[6/7] Настройка автозапуска...${NC}"
-
-    # vless-tproxy init
-    wget -q -O /etc/init.d/vless-tproxy "$REPO/etc/init.d/vless-tproxy"
-    chmod +x /etc/init.d/vless-tproxy
-    /etc/init.d/vless-tproxy enable
-    ok "vless-tproxy init скрипт"
-
-    # tgbot init
-    wget -q -O /etc/init.d/tgbot "$REPO/etc/init.d/tgbot"
-    chmod +x /etc/init.d/tgbot
-    /etc/init.d/tgbot enable
-    ok "tgbot init скрипт"
-
-    # xray уже включён выше
-    /etc/init.d/xray enable
-    ok "xray автозапуск"
-
-    # Проверяем что все три в rc.d
-    for s in xray vless-tproxy tgbot; do
-        if ls /etc/rc.d/S*$s > /dev/null 2>&1; then
-            ok "Автозапуск $s ✅"
-        else
-            err "Автозапуск $s не настроен!"
-        fi
-    done
-
-    set_stage 6
-    echo ""
+# geoip.dat
+if [ ! -s /usr/share/xray/geoip.dat ]; then
+    inf "Скачиваю geoip.dat (~18MB)..."
+    wget -q -O /usr/share/xray/geoip.dat \
+        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+    if [ -s /usr/share/xray/geoip.dat ]; then
+        ok "geoip.dat ($(du -h /usr/share/xray/geoip.dat | cut -f1))"
+    else
+        warn "geoip.dat не скачался — трафик пойдёт весь через VLESS"
+        rm -f /usr/share/xray/geoip.dat
+    fi
+else
+    ok "geoip.dat уже есть ($(du -h /usr/share/xray/geoip.dat | cut -f1))"
 fi
 
+# Xray UCI
+uci set xray.enabled.enabled='1' 2>/dev/null
+uci commit xray 2>/dev/null
+ok "Xray UCI включён"
+
+echo ""
+
 # =============================================================================
-# ЭТАП 7: Финальный ребут и проверка
+# ЭТАП 5: Init-скрипты и автозапуск
 # =============================================================================
-if [ "$STAGE" -lt 7 ]; then
-    echo "${BLUE}[7/7] Финальная перезагрузка...${NC}"
-    set_stage 7
 
-    echo ""
-    ok "Все этапы завершены! Перезагружаю роутер..."
-    echo ""
-    warn "После загрузки (2-3 мин) проверь:"
-    warn "  1. SSH на роутер"
-    warn "  2. Запусти: bash /tmp/check.sh"
-    warn "  3. Открой браузер: http://192.168.5.1:8080"
-    warn "  4. Telegram: напиши боту /start"
-    echo ""
+echo "[5/6] Автозапуск..."
 
-    # Сохраняем скрипт проверки
-    cat > /tmp/check.sh << 'CHECKEOF'
-#!/bin/sh
-echo ""
-echo "=== Проверка после деплоя ==="
-echo ""
-pgrep -f /usr/bin/xray    > /dev/null && echo "✅ Xray работает"    || echo "❌ Xray не запущен"
-pgrep -f "python3 bot.py" > /dev/null && echo "✅ Бот работает"     || echo "❌ Бот не запущен"
-pgrep -f "setup_server"   > /dev/null && echo "✅ Веб-панель работает" || echo "❌ Веб-панель не запущена"
-nft list table inet vless_tproxy > /dev/null 2>&1 && echo "✅ TPROXY правила загружены" || echo "❌ TPROXY не настроен"
-echo ""
-echo "Порты:"
-netstat -tlnp 2>/dev/null | grep -E "10808|10809|12345|8080" | awk '{print "  " $4 " " $7}'
-echo ""
-echo "Свободно места:"
-df -h / | tail -1 | awk '{print "  " $4 " свободно из " $2}'
-echo ""
-CHECKEOF
+for INIT in vless-tproxy tgbot; do
+    if [ ! -f /etc/init.d/$INIT ]; then
+        inf "Скачиваю init/$INIT..."
+        wget -q -O /etc/init.d/$INIT "$REPO/etc/init.d/$INIT"
+        chmod +x /etc/init.d/$INIT
+        ok "init/$INIT загружен"
+    else
+        ok "init/$INIT уже есть"
+    fi
+    /etc/init.d/$INIT enable 2>/dev/null
+done
 
-    sleep 5
-    reboot
+/etc/init.d/xray enable 2>/dev/null
+
+# Проверяем что все три в автозапуске
+ALL_OK=1
+for S in xray vless-tproxy tgbot; do
+    if ls /etc/rc.d/S*$S > /dev/null 2>&1; then
+        ok "Автозапуск $S"
+    else
+        err "Автозапуск $S не настроен!"
+        ALL_OK=0
+    fi
+done
+
+if [ $ALL_OK -eq 0 ]; then
+    exit 1
 fi
 
-# Если добрались сюда — всё уже сделано
+echo ""
+
+# =============================================================================
+# ЭТАП 6: Финальный ребут
+# =============================================================================
+
+echo "[6/6] Финальная перезагрузка..."
+
+# Убираем себя из rc.local — деплой завершён
+unregister_resume
+
 echo ""
 echo "============================================"
 ok "Деплой завершён!"
 echo ""
-inf "Токен бота: ${BOT_TOKEN:0:20}..."
+inf "Токен: ${BOT_TOKEN:0:20}..."
 inf "Admin ID: $ADMIN_ID"
-inf "Веб-панель: http://192.168.5.1:8080"
-inf "Telegram: /start боту"
+inf "Веб-панель: http://$(uci get network.lan.ipaddr 2>/dev/null || echo '192.168.x.1'):8080"
 echo "============================================"
 echo ""
+inf "Перезагружаю через 5 секунд..."
+log "=== Deploy complete ==="
 
-# Очищаем флаг этапов
-rm -f "$STAGE_FILE"
+sleep 5
+reboot
