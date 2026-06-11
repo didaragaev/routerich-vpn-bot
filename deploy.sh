@@ -19,11 +19,11 @@ STAGE_FILE="/etc/deploy_stage"
 LOG_FILE="/tmp/deploy.log"
 
 # --- Цвета ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+RED=''
+GREEN=''
+YELLOW=''
+BLUE=''
+NC=''
 
 # --- Аргументы ---
 BOT_TOKEN=""
@@ -130,23 +130,39 @@ if [ "$STAGE" -lt 2 ]; then
     fi
     ok "Флешка найдена: $USB_DEV"
 
-    # Проверяем нет ли уже ext4-раздела с меткой extroot
-    EXISTING=$(block info 2>/dev/null | grep 'LABEL="extroot"' | grep 'TYPE="ext4"')
-    if [ -n "$EXISTING" ]; then
+    # Умная проверка состояния флешки
+    EXISTING_EXTROOT=$(block info 2>/dev/null | grep 'LABEL="extroot"' | grep 'TYPE="ext4"')
+    CURRENT_TYPE=$(block info "${USB_DEV}1" 2>/dev/null | grep -o 'TYPE="[^"]*"' | cut -d'"' -f2)
+
+    if [ -n "$EXISTING_EXTROOT" ]; then
+        # Уже ext4 с меткой extroot — всё готово
         warn "Раздел extroot уже существует — пропускаем форматирование"
+    elif [ "$CURRENT_TYPE" = "ext4" ]; then
+        # ext4 но без метки — добавляем метку
+        inf "Флешка уже ext4, добавляю метку extroot..."
+        umount "${USB_DEV}1" 2>/dev/null
+        for mnt in $(mount | grep "${USB_DEV}" | awk '{print $3}'); do
+            umount "$mnt" 2>/dev/null
+        done
+        e2label "${USB_DEV}1" extroot 2>/dev/null || true
+        ok "Метка extroot установлена"
     else
-        inf "Форматирую флешку (все данные будут удалены)..."
+        # FAT32/exFAT/NTFS/пустая — отмонтируем и форматируем
+        if [ -n "$CURRENT_TYPE" ]; then
+            inf "Обнаружена $CURRENT_TYPE — отмонтирую и форматирую в ext4..."
+        else
+            inf "Форматирую флешку в ext4..."
+        fi
+
+        # Отмонтируем все разделы флешки
+        for mnt in $(mount | grep "${USB_DEV}" | awk '{print $3}'); do
+            umount "$mnt" 2>/dev/null
+        done
+        umount "${USB_DEV}1" 2>/dev/null
+        sleep 1
 
         # Размечаем флешку
-        (
-            echo o   # новая DOS-таблица
-            echo n   # новый раздел
-            echo p   # primary
-            echo 1   # номер 1
-            echo     # start по умолчанию
-            echo     # end по умолчанию (весь объём)
-            echo w   # записать
-        ) | fdisk "$USB_DEV" >> "$LOG_FILE" 2>&1
+        printf "o\nn\np\n1\n\n\nw\n" | fdisk "$USB_DEV" >> "$LOG_FILE" 2>&1
 
         sleep 2
 
