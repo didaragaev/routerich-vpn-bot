@@ -164,6 +164,31 @@ if ! wget -q --spider https://raw.githubusercontent.com 2>/dev/null; then
 fi
 ok "Интернет есть"
 
+# Определяем тип прошивки и настраиваем opkg
+if grep -q "RouteRich" /etc/openwrt_release 2>/dev/null; then
+    ok "Прошивка: RouteRich"
+else
+    ok "Прошивка: чистый OpenWrt"
+    # Исправляем репозитории если там SNAPSHOT
+    if grep -q "SNAPSHOT" /etc/opkg/distfeeds.conf 2>/dev/null; then
+        inf "Исправляю репозитории (SNAPSHOT -> 24.10.5)..."
+        ARCH=$(grep DISTRIB_ARCH /etc/openwrt_release | cut -d"'" -f2)
+        cat > /etc/opkg/distfeeds.conf << FEEDEOF
+src/gz openwrt_core https://downloads.openwrt.org/releases/24.10.5/targets/mediatek/filogic/packages
+src/gz openwrt_base https://downloads.openwrt.org/releases/24.10.5/packages/${ARCH}/base
+src/gz openwrt_luci https://downloads.openwrt.org/releases/24.10.5/packages/${ARCH}/luci
+src/gz openwrt_packages https://downloads.openwrt.org/releases/24.10.5/packages/${ARCH}/packages
+src/gz openwrt_routing https://downloads.openwrt.org/releases/24.10.5/packages/${ARCH}/routing
+FEEDEOF
+        ok "Репозитории исправлены"
+    fi
+    # Отключаем SSL проверку (нет CA-сертификатов на чистом OpenWrt)
+    if ! grep -q "no_check_certificate" /etc/opkg.conf 2>/dev/null; then
+        echo "option no_check_certificate 1" >> /etc/opkg.conf
+        ok "SSL проверка отключена для opkg"
+    fi
+fi
+
 # Копируем скрипт в /root чтобы был доступен после ребута
 if [ "$SELF" != "/root/deploy.sh" ]; then
     cp "$SELF" /root/deploy.sh
