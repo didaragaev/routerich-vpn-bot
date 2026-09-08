@@ -368,17 +368,21 @@ mkdir -p /usr/share/xray
 BOT_FILES="bot.py tg_client.py storage.py vless_parser.py xray_manager.py ip_utils.py setup_server.py"
 
 for F in $BOT_FILES; do
-    # Перескачиваем если файл отсутствует или пустой
-    if [ ! -s "$BOT_DIR/$F" ]; then
-        inf "Скачиваю $F..."
-        wget -q -O "$BOT_DIR/$F" "$REPO/bot/$F"
-        if [ $? -ne 0 ] || [ ! -s "$BOT_DIR/$F" ]; then
+    # Код бота — ВСЕГДА тянем свежий из репы (перезаписываем), чтобы redeploy
+    # обновлял логику. config.py / admin.json / links.json — не в списке, целы.
+    inf "Обновляю $F..."
+    wget -q -O "$BOT_DIR/$F.new" "$REPO/bot/$F"
+    if [ $? -ne 0 ] || [ ! -s "$BOT_DIR/$F.new" ]; then
+        rm -f "$BOT_DIR/$F.new"
+        if [ -s "$BOT_DIR/$F" ]; then
+            warn "$F не скачался — оставил текущую версию"
+        else
             err "Не удалось скачать $F"
             exit 1
         fi
-        ok "$F"
     else
-        ok "$F (уже есть)"
+        mv "$BOT_DIR/$F.new" "$BOT_DIR/$F"
+        ok "$F"
     fi
 done
 
@@ -450,19 +454,48 @@ else
     ok "vless-tproxy.nft уже есть"
 fi
 
-# geoip.dat
-if [ ! -s /usr/share/xray/geoip.dat ]; then
-    inf "Скачиваю geoip.dat (~18MB)..."
-    wget -q -O /usr/share/xray/geoip.dat \
-        "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-    if [ -s /usr/share/xray/geoip.dat ]; then
-        ok "geoip.dat ($(du -h /usr/share/xray/geoip.dat | cut -f1))"
+# geo-списки (источник: runetfreedom — авто-обновляемые списки РКН, обе .dat)
+GEO_BASE="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release"
+GEO_MARKER="/usr/share/xray/.geo_source"
+GEO_WANT="runetfreedom-1"
+if [ "$(cat $GEO_MARKER 2>/dev/null)" != "$GEO_WANT" ] || \
+   [ ! -s /usr/share/xray/geoip.dat ] || [ ! -s /usr/share/xray/geosite.dat ]; then
+    inf "Скачиваю geo-списки runetfreedom (geoip ~18MB + geosite ~71MB)..."
+    GEO_OK=1
+    for GF in geoip geosite; do
+        wget -q -O "/usr/share/xray/$GF.dat.tmp" "$GEO_BASE/$GF.dat"
+        if [ -s "/usr/share/xray/$GF.dat.tmp" ]; then
+            mv "/usr/share/xray/$GF.dat.tmp" "/usr/share/xray/$GF.dat"
+            ok "$GF.dat ($(du -h /usr/share/xray/$GF.dat | cut -f1))"
+        else
+            rm -f "/usr/share/xray/$GF.dat.tmp"
+            warn "$GF.dat не скачался"
+            GEO_OK=0
+        fi
+    done
+    if [ $GEO_OK -eq 1 ]; then
+        echo "$GEO_WANT" > "$GEO_MARKER"
     else
-        warn "geoip.dat не скачался — трафик пойдёт весь через VLESS"
-        rm -f /usr/share/xray/geoip.dat
+        warn "Без geo-списков ВСЁ пойдёт напрямую (без разблокировки) — крон дотянет позже"
     fi
 else
-    ok "geoip.dat уже есть ($(du -h /usr/share/xray/geoip.dat | cut -f1))"
+    ok "geo-списки актуальны (geoip $(du -h /usr/share/xray/geoip.dat|cut -f1) + geosite $(du -h /usr/share/xray/geosite.dat|cut -f1))"
+fi
+
+# Авто-обновление geo раз в сутки (крон 04:00)
+if [ ! -s /usr/share/xray/update-geo.sh ]; then
+    wget -q -O /usr/share/xray/update-geo.sh "$REPO/etc/update-geo.sh"
+fi
+if [ -s /usr/share/xray/update-geo.sh ]; then
+    chmod +x /usr/share/xray/update-geo.sh 2>/dev/null
+    mkdir -p /etc/crontabs; touch /etc/crontabs/root
+    grep -q 'update-geo.sh' /etc/crontabs/root || \
+        echo "0 4 * * * /usr/share/xray/update-geo.sh" >> /etc/crontabs/root
+    /etc/init.d/cron enable 2>/dev/null
+    /etc/init.d/cron restart 2>/dev/null
+    ok "Авто-обновление geo включено (крон, ежедневно 04:00)"
+else
+    warn "update-geo.sh не установлен — авто-обновление списков не включено"
 fi
 
 # Xray UCI

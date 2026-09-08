@@ -18,12 +18,35 @@ PRIVATE_IP_RANGES = [
 ]
 
 GEOIP_DAT = "/usr/share/xray/geoip.dat"
+GEOSITE_DAT = "/usr/share/xray/geosite.dat"
+ROUTING_FILE = "/opt/tgbot/routing.json"
+
+
+def _dat_ok(path: str) -> bool:
+    return os.path.exists(path) and os.path.getsize(path) > 1024
 
 
 def _has_geoip() -> bool:
-    """Проверяет есть ли geoip.dat на роутере."""
-    import os
-    return os.path.exists(GEOIP_DAT) and os.path.getsize(GEOIP_DAT) > 1024
+    return _dat_ok(GEOIP_DAT)
+
+
+def _has_geosite() -> bool:
+    return _dat_ok(GEOSITE_DAT)
+
+
+def _load_routing() -> dict:
+    """Кастомные правила из routing.json (пишет бот). Нет файла — пусто."""
+    default = {"direct_domains": [], "direct_ips": [], "node_domains": []}
+    if not os.path.exists(ROUTING_FILE):
+        return default
+    try:
+        with open(ROUTING_FILE) as f:
+            data = json.load(f)
+        for k in default:
+            default[k] = [str(x).strip() for x in data.get(k, []) if str(x).strip()]
+    except (json.JSONDecodeError, OSError):
+        pass
+    return default
 
 
 def build_vless_outbound(link: dict) -> dict:
@@ -63,6 +86,47 @@ def build_vless_outbound(link: dict) -> dict:
         },
         "streamSettings": stream,
     }
+
+
+def build_routing() -> dict:
+    """Модель: по умолчанию DIRECT; в ноду — только заблокированное.
+    Порядок правил = приоритет (первое совпадение выигрывает)."""
+    geoip = _has_geoip()
+    geosite = _has_geosite()
+    custom = _load_routing()
+    rules = []
+
+    # 0. Локальные сети — всегда напрямую
+    rules.append({"type": "field", "ip": PRIVATE_IP_RANGES, "outboundTag": "direct"})
+
+    # 1. Кастом-direct (облачная 1С, краевые случаи) — из routing.json
+    if custom["direct_domains"]:
+        rules.append({"type": "field", "domain": custom["direct_domains"], "outboundTag": "direct"})
+    if custom["direct_ips"]:
+        rules.append({"type": "field", "ip": custom["direct_ips"], "outboundTag": "direct"})
+
+    # 2. Российское — напрямую (домены + IP)
+    if geosite:
+        rules.append({"type": "field", "domain": ["geosite:category-ru"], "outboundTag": "direct"})
+    if geoip:
+        rules.append({"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"})
+
+    # 3. Apple / iCloud — напрямую (лечит почту и «отключите VPN»)
+    if geosite:
+        rules.append({"type": "field", "domain": ["geosite:apple"], "outboundTag": "direct"})
+
+    # 4. Заблокированное — через ноду (авто-фид РКН + кастом из бота)
+    if geosite:
+        rules.append({"type": "field", "domain": ["geosite:ru-blocked"], "outboundTag": "vless-out"})
+    if geoip:
+        rules.append({"type": "field", "ip": ["geoip:ru-blocked", "geoip:re-filter"], "outboundTag": "vless-out"})
+    if custom["node_domains"]:
+        rules.append({"type": "field", "domain": custom["node_domains"], "outboundTag": "vless-out"})
+
+    # 5. Всё остальное — напрямую (ПЕРЕВОРОТ модели: раньше падало в ноду)
+    rules.append({"type": "field", "network": "tcp,udp", "outboundTag": "direct"})
+
+    return {"domainStrategy": "IPIfNonMatch", "rules": rules}
 
 
 def build_config(link: dict) -> dict:
@@ -105,19 +169,7 @@ def build_config(link: dict) -> dict:
             {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIP"}},
             {"tag": "block",  "protocol": "blackhole"},
         ],
-        "routing": {
-            "domainStrategy": "IPIfNonMatch",
-            "rules": [
-                # Локальные сети — всегда напрямую
-                {"type": "field", "ip": PRIVATE_IP_RANGES, "outboundTag": "direct"},
-                # Российские IP — напрямую (если есть geoip.dat)
-                *([
-                    {"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"},
-                    {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
-                ] if _has_geoip() else []),
-                # Всё остальное — через VLESS
-            ],
-        },
+        "routing": build_routing(),
     }
 
 
