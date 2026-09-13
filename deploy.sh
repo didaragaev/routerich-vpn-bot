@@ -482,6 +482,13 @@ else
     ok "geo-списки актуальны (geoip $(du -h /usr/share/xray/geoip.dat|cut -f1) + geosite $(du -h /usr/share/xray/geosite.dat|cut -f1))"
 fi
 
+# apply-routing.sh — ручная пересборка config.json без бота
+wget -q -O /usr/share/xray/apply-routing.sh "$REPO/etc/apply-routing.sh"
+if [ -s /usr/share/xray/apply-routing.sh ]; then
+    chmod +x /usr/share/xray/apply-routing.sh
+    ok "apply-routing.sh установлен (пересборка конфига без бота)"
+fi
+
 # Авто-обновление geo раз в сутки (крон 04:00)
 if [ ! -s /usr/share/xray/update-geo.sh ]; then
     wget -q -O /usr/share/xray/update-geo.sh "$REPO/etc/update-geo.sh"
