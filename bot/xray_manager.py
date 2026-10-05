@@ -123,10 +123,6 @@ def build_routing() -> dict:
     if custom["node_domains"]:
         rules.append({"type": "field", "domain": custom["node_domains"], "outboundTag": "vless-out"})
 
-    # 4b. YouTube — через ноду (остальной Google идёт direct).
-    if geosite:
-        rules.append({"type": "field", "domain": ["geosite:youtube"], "outboundTag": "vless-out"})
-
     # 5. Всё остальное — напрямую (ПЕРЕВОРОТ модели: раньше падало в ноду)
     rules.append({"type": "field", "network": "tcp,udp", "outboundTag": "direct"})
 
