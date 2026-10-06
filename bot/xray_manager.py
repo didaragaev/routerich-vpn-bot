@@ -115,6 +115,15 @@ def build_routing() -> dict:
     if geosite:
         rules.append({"type": "field", "domain": ["geosite:apple"], "outboundTag": "direct"})
 
+    # 3b. Google + YouTube целиком — ЧЕРЕЗ НОДУ, одним IP.
+    #     Если часть Google идёт direct (РФ), а часть в ноду (по блок-листу),
+    #     приложения видят две страны сразу и ломаются (Family Link, Карты).
+    #     YouTube напрямую в РФ режется, поэтому весь Google — в ноду.
+    if geosite:
+        rules.append({"type": "field", "domain": ["geosite:google", "geosite:youtube"], "outboundTag": "vless-out"})
+    if geoip:
+        rules.append({"type": "field", "ip": ["geoip:google"], "outboundTag": "vless-out"})
+
     # 4. Заблокированное — через ноду (авто-фид РКН + кастом из бота)
     if geosite:
         rules.append({"type": "field", "domain": ["geosite:ru-blocked"], "outboundTag": "vless-out"})
