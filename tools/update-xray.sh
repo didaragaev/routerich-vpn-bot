@@ -3,8 +3,10 @@
 # Запуск: wget -O /tmp/u.sh <raw-url> && sh /tmp/u.sh
 
 VER="26.7.28"
+SHA="f5698bb218ada3b4022db26fafc39601c5f53b46b19eb76c9616325985807501"
 ZIP="Xray-linux-arm64-v8a.zip"
 URL="https://github.com/XTLS/Xray-core/releases/download/v$VER"
+MIRROR="https://raw.githubusercontent.com/didaragaev/routerich-vpn-bot/main/tools/bin/Xray-linux-arm64-v8a-$VER.zip"
 BIN="$(command -v xray || echo /usr/bin/xray)"
 TMP="/tmp/xray-upd"
 
@@ -20,17 +22,19 @@ fi
 
 rm -rf "$TMP"; mkdir -p "$TMP"; cd "$TMP" || exit 1
 
-dl() { wget -q -O "$2" "$1" || wget -q --no-check-certificate -O "$2" "$1"; }
+# -4: у части провайдеров мёртвый IPv6, wget на нём виснет
+dl() { wget -4 -T 60 -q -O "$2" "$1" || wget -4 -T 60 -q --no-check-certificate -O "$2" "$1"; }
+sha_ok() { [ "$(sha256sum "$ZIP" 2>/dev/null | awk '{print $1}')" = "$SHA" ]; }
 
 echo "== Скачиваю $VER =="
-dl "$URL/$ZIP" "$ZIP" || { echo "ОШИБКА: не скачался zip"; exit 1; }
-dl "$URL/$ZIP.dgst" "$ZIP.dgst" || { echo "ОШИБКА: не скачался dgst"; exit 1; }
-
-WANT=$(grep -i 'SHA2-256' "$ZIP.dgst" | awk '{print $2}')
-GOT=$(sha256sum "$ZIP" | awk '{print $1}')
-if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
-  echo "ОШИБКА: sha256 не совпал, ничего не менял"; exit 1
+if dl "$URL/$ZIP" "$ZIP" && sha_ok; then
+  echo "скачал с GitHub Releases"
+else
+  echo "Releases недоступен, качаю из репо..."
+  rm -f "$ZIP"
+  dl "$MIRROR" "$ZIP" || { echo "ОШИБКА: не скачался zip ни откуда"; exit 1; }
 fi
+sha_ok || { echo "ОШИБКА: sha256 не совпал, ничего не менял"; exit 1; }
 echo "sha256 OK"
 
 command -v unzip >/dev/null || { opkg update >/dev/null 2>&1; opkg install unzip >/dev/null 2>&1; }
